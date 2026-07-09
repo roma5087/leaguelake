@@ -1,0 +1,15 @@
+# Declares the Lakeflow (Delta Live Tables) pipeline that runs our medallion code.
+# Pulled in by databricks.yml via `include: resources/*.yml`.
+resources:
+  pipelines:
+    leaguelake_pipeline:                       # bundle-internal key (how we refer to it in CLI)
+      name: leaguelake-medallion               # display name shown in the Databricks UI
+      serverless: true                         # Free Edition = serverless compute (no clusters)
+      catalog: workspace                       # Unity Catalog catalog to write tables into
+      schema: leaguelake                       # schema -> tables land as workspace.leaguelake.bronze_*
+      libraries:
+        - file:
+            path: ../src/pipelines/bronze.py   # the pipeline's source code (path relative to this file)
+      configuration:
+        # Exposed to bronze.py via spark.conf.get("leaguelake.volume_root")
+        leaguelake.volume_root: /Volumes/workspace/leaguelake/bronze/raw

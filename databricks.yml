@@ -1,0 +1,12 @@
+bundle:
+  name: leaguelake
+
+include:
+  - resources/*.yml
+
+targets:
+  dev: 
+    mode: development
+    default: true
+    workspace: 
+      host: https://dbc-fc62342d-ea44.cloud.databricks.com
