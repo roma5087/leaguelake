@@ -4,6 +4,12 @@ bundle:
 include:
   - resources/*.yml
 
+# Don't ship the raw data folder up with the bundle — the pipeline reads the
+# Unity Catalog Volume, not these workspace files. Keeps deploys lean.
+sync:
+  exclude:
+    - raw/**
+
 targets:
   dev: 
     mode: development
