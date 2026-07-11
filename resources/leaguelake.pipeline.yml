@@ -12,6 +12,8 @@ resources:
             path: ../src/pipelines/bronze.py   # Bronze: Auto Loader ingestion
         - file:
             path: ../src/pipelines/silver.py   # Silver: star schema + SCD2
+        - file:
+            path: ../src/pipelines/gold.py     # Gold: business metrics
       configuration:
         # Exposed to bronze.py via spark.conf.get("leaguelake.volume_root")
         leaguelake.volume_root: /Volumes/workspace/leaguelake/bronze/raw
