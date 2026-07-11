@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Make `from leaguelake import rules` resolve without installing the package.
+pythonpath = ["src"]
+testpaths = ["tests"]
