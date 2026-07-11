@@ -10,6 +10,7 @@ Runs in the same pipeline as bronze.py (runtime provides `spark` + `dlt`).
 import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pyspark.sql.types import MapType, StringType, LongType, DoubleType, StructType, StructField
 
 WEEK_RE = r"week=(\d+)"   # pull the week number out of a file path
 
@@ -114,3 +115,94 @@ def fact_matchup():
          .otherwise("T").alias("median_result"),
         (F.col("week") < F.col("playoff_week_start")).alias("is_regular"),
     )
+
+
+# ==================== PASS B ====================
+
+# ---------- dim_player : explode the 12,200-player JSON dict ----------
+# bronze_players_raw is ONE row with the whole player dictionary as a JSON string.
+# Parse it as a map<player_id, {fields}> and explode to one row per player.
+PLAYER_SCHEMA = StructType([
+    StructField("full_name", StringType()),
+    StructField("first_name", StringType()),
+    StructField("last_name", StringType()),
+    StructField("position", StringType()),
+    StructField("team", StringType()),
+])
+
+@dlt.table(name="dim_player", comment="One row per NFL player (name, position, team).",
+           table_properties={"layer": "silver"})
+def dim_player():
+    m = F.from_json("players_json", MapType(StringType(), PLAYER_SCHEMA))
+    return (dlt.read("bronze_players_raw")
+            .select(F.explode(m).alias("player_id", "p"))
+            .select("player_id",
+                    F.coalesce(F.col("p.full_name"),
+                               F.concat_ws(" ", F.col("p.first_name"), F.col("p.last_name"))
+                               ).alias("full_name"),
+                    F.col("p.position").alias("position"),
+                    F.col("p.team").alias("team")))
+
+
+# ---------- fact_roster_slot : one rostered player per team-week ----------
+# Powers "points left on the bench". players_points is a wide struct, so we
+# convert it struct->JSON->map to look up each player's points dynamically.
+@dlt.table(name="fact_roster_slot",
+           comment="One rostered player per team-week: weekly points + is_starter.",
+           table_properties={"layer": "silver"})
+@dlt.expect("valid_week", "week BETWEEN 1 AND 18")
+def fact_roster_slot():
+    ex = (dlt.read("bronze_matchups")
+          .withColumn("week", F.regexp_extract("_source_file", WEEK_RE, 1).cast("int"))
+          .select("season", "week", "roster_id",
+                  F.col("starters"),
+                  F.from_json(F.to_json("players_points"),
+                              MapType(StringType(), DoubleType())).alias("pp"),
+                  F.explode("players").alias("player_id")))
+    r = dlt.read("bronze_rosters").select("season", "roster_id",
+                                          F.col("owner_id").alias("user_id"))
+    return (ex.select("season", "week", "roster_id", "player_id",
+                      F.element_at("pp", F.col("player_id")).alias("points"),
+                      F.array_contains("starters", F.col("player_id")).alias("is_starter"))
+              .join(r, ["season", "roster_id"], "left")
+              .select("season", "week", "roster_id", "user_id",
+                      "player_id", "points", "is_starter"))
+
+
+# ---------- fact_transaction : one add/drop item ----------
+# adds/drops are wide structs keyed by player_id -> roster_id; convert to a map
+# and explode. Unions the add rows and drop rows.
+@dlt.table(name="fact_transaction", comment="One add/drop item per transaction.",
+           table_properties={"layer": "silver"})
+def fact_transaction():
+    tx = dlt.read("bronze_transactions")
+    add_m = F.from_json(F.to_json("adds"), MapType(StringType(), LongType()))
+    drop_m = F.from_json(F.to_json("drops"), MapType(StringType(), LongType()))
+    base = tx.select("transaction_id", "type", "status", "season",
+                     F.col("leg").alias("week"),
+                     F.col("settings.waiver_bid").alias("faab_bid"),
+                     add_m.alias("add_m"), drop_m.alias("drop_m"))
+    adds = base.select("transaction_id", "type", "status", "season", "week", "faab_bid",
+                       F.explode("add_m").alias("player_id", "roster_id"),
+                       F.lit("add").alias("action"))
+    drops = base.select("transaction_id", "type", "status", "season", "week", "faab_bid",
+                        F.explode("drop_m").alias("player_id", "roster_id"),
+                        F.lit("drop").alias("action"))
+    r = dlt.read("bronze_rosters").select("season", "roster_id",
+                                          F.col("owner_id").alias("user_id"))
+    return (adds.unionByName(drops)
+            .join(r, ["season", "roster_id"], "left")
+            .select("transaction_id", "season", "week", "type", "action",
+                    "player_id", "roster_id", "user_id", "faab_bid"))
+
+
+# ---------- fact_draft_pick : one pick, with auction $ ----------
+@dlt.table(name="fact_draft_pick", comment="One draft pick with auction dollar amount.",
+           table_properties={"layer": "silver"})
+@dlt.expect("valid_auction_amount", "auction_amount BETWEEN 0 AND 200")
+def fact_draft_pick():
+    return dlt.read("bronze_draft_picks").select(
+        "season", "draft_id", "pick_no", "round", "draft_slot",
+        F.col("player_id"), F.col("roster_id"),
+        F.col("picked_by").alias("user_id"),
+        F.col("metadata.amount").cast("int").alias("auction_amount"))
