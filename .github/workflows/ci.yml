@@ -1,0 +1,44 @@
+name: CI
+
+# Test on every push/PR; deploy the Databricks bundle on push to main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- unit tests (no Databricks auth needed) ----
+  test:
+    name: Unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run pytest
+        run: pytest -v
+
+  # ---- deploy the bundle to Databricks (dev target) ----
+  deploy:
+    name: Deploy bundle (dev)
+    needs: test                                   # only deploy if tests pass
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: https://dbc-fc62342d-ea44.cloud.databricks.com
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}   # PAT stored as a repo secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main             # installs the Databricks CLI
+      - name: Validate bundle
+        run: databricks bundle validate -t dev
+      - name: Deploy bundle
+        run: databricks bundle deploy -t dev
