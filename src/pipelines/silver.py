@@ -18,6 +18,7 @@ WEEK_RE = r"week=(\d+)"   # pull the week number out of a file path
 # ---------- dim_season : one row per league season ----------
 @dlt.table(name="dim_season", comment="One league season: settings + playoff structure.",
            table_properties={"layer": "silver"})
+@dlt.expect_or_fail("season_present", "season IS NOT NULL")   # FAIL mode: a null season is a hard error
 def dim_season():
     return dlt.read("bronze_league").select(
         F.col("season"),
@@ -72,8 +73,9 @@ dlt.apply_changes(
 @dlt.table(name="fact_matchup",
            comment="One row per team-week: points, opponent points, weekly median, H2H + median results.",
            table_properties={"layer": "silver"})
-@dlt.expect("points_non_negative", "points >= 0")
-@dlt.expect("valid_week", "week BETWEEN 1 AND 18")
+@dlt.expect("points_non_negative", "points >= 0")                              # WARN modes:
+@dlt.expect("valid_week", "week BETWEEN 1 AND 18")                             #   track violations,
+@dlt.expect("regular_has_opponent", "NOT is_regular OR opponent_points IS NOT NULL")  # keep the rows
 def fact_matchup():
     grp = Window.partitionBy("season", "week", "matchup_id")
 
@@ -199,10 +201,22 @@ def fact_transaction():
 # ---------- fact_draft_pick : one pick, with auction $ ----------
 @dlt.table(name="fact_draft_pick", comment="One draft pick with auction dollar amount.",
            table_properties={"layer": "silver"})
-@dlt.expect("valid_auction_amount", "auction_amount BETWEEN 0 AND 200")
+@dlt.expect("valid_auction_amount", "auction_amount BETWEEN 0 AND 200")   # WARN
+@dlt.expect_or_drop("has_player", "player_id IS NOT NULL")                # DROP: a pick with no player is unusable
 def fact_draft_pick():
     return dlt.read("bronze_draft_picks").select(
         "season", "draft_id", "pick_no", "round", "draft_slot",
         F.col("player_id"), F.col("roster_id"),
         F.col("picked_by").alias("user_id"),
         F.col("metadata.amount").cast("int").alias("auction_amount"))
+
+
+# ---------- fact_roster_slot_quarantine : bad-record capture ----------
+# Quarantine pattern: rows that pass ingestion but violate a business rule are
+# routed to a separate table for inspection instead of silently kept or dropped.
+# Rule: a STARTED player with no recorded points (started an inactive player).
+@dlt.table(name="fact_roster_slot_quarantine",
+           comment="Quarantined roster slots: a started player with NULL points (data-quality review).",
+           table_properties={"layer": "silver"})
+def fact_roster_slot_quarantine():
+    return dlt.read("fact_roster_slot").filter("is_starter = true AND points IS NULL")
