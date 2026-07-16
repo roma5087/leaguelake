@@ -71,8 +71,13 @@ def test_all_play_counts_ties_as_half():
 
 # ---- expected wins & luck ----
 def test_expected_wins_scales_all_play_rate_to_games():
-    # 60% all-play over 28 games -> 16.8 expected
-    assert rules.expected_wins(all_play_wins=66, all_play_games=110, total_games=28) == 16.8
+    # self-consistent fixture: 14 regular weeks x 11 opponents = 154 all-play games,
+    # 28 total games (14 x 2). 60% all-play -> 16.8 expected.
+    assert rules.expected_wins(all_play_wins=92.4, all_play_games=154, total_games=28) == 16.8
+
+def test_expected_wins_non_terminating_ratio():
+    # 84/154 = 0.5454..., x28 = 15.27 -> 15.3 (locks single-round-of-raw-ratio, matching gold.py)
+    assert rules.expected_wins(84, 154, 28) == 15.3
 
 def test_expected_wins_zero_games_is_zero():
     assert rules.expected_wins(0, 0, 28) == 0.0

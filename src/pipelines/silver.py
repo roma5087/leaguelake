@@ -112,7 +112,8 @@ def fact_matchup():
          .when(F.col("points") > F.col("opponent_points"), "W")
          .when(F.col("points") < F.col("opponent_points"), "L")
          .otherwise("T").alias("h2h_result"),
-        F.when(F.col("points") > F.col("median_points"), "W")
+        F.when(F.col("median_points").isNull(), F.lit(None))
+         .when(F.col("points") > F.col("median_points"), "W")
          .when(F.col("points") < F.col("median_points"), "L")
          .otherwise("T").alias("median_result"),
         (F.col("week") < F.col("playoff_week_start")).alias("is_regular"),

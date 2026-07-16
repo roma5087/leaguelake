@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Serialize runs per ref so two quick pushes can't race a bundle deploy.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ---- unit tests (no Databricks auth needed) ----
   test:
@@ -33,12 +38,16 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
-      DATABRICKS_HOST: https://dbc-fc62342d-ea44.cloud.databricks.com
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}   # PAT stored as a repo secret
+      DATABRICKS_HOST: https://dbc-fc62342d-ea44.cloud.databricks.com   # not secret
     steps:
       - uses: actions/checkout@v4
-      - uses: databricks/setup-cli@main             # installs the Databricks CLI
+      # pinned to a commit SHA (v1.7.0) so a compromised branch can't run in the token's job
+      - uses: databricks/setup-cli@bc7e6aabb6006d8d1758bd25ee1a100935c9cb7c
       - name: Validate bundle
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}   # scoped to this step only
         run: databricks bundle validate -t dev
       - name: Deploy bundle
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: databricks bundle deploy -t dev

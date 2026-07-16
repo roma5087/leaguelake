@@ -32,32 +32,50 @@ MAX_WEEK = 18          # loop weeks 1..18; empties are skipped
 POLITE_SLEEP = 0.05    # small courtesy delay between calls
 
 
-def get(path: str, *, allow_404: bool = False):
-    """GET {BASE}{path} -> parsed JSON. Returns None on 404 when allowed."""
+def get(path: str, *, allow_404: bool = False, retries: int = 4):
+    """GET {BASE}{path} -> parsed JSON. Retries transient errors (429/5xx/network)
+    with exponential backoff. Returns None on 404 when allowed."""
     url = f"{BASE}{path}"
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            data = json.load(r)
-        time.sleep(POLITE_SLEEP)
-        return data
-    except urllib.error.HTTPError as e:
-        if e.code == 404 and allow_404:
-            return None
-        raise
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.load(r)
+            time.sleep(POLITE_SLEEP)
+            return data
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and allow_404:
+                return None
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(2 ** attempt)   # backoff: 1, 2, 4, 8s
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def write_json(path: str, obj) -> int:
+    """Write JSON atomically (temp file + rename) so a crash/interrupt can't
+    leave a truncated file at a real path that Auto Loader would then ingest."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(obj, f)
+    os.replace(tmp, path)   # atomic rename on the same filesystem
     return os.path.getsize(path)
 
 
 def season_chain(current_league_id: str) -> list[dict]:
-    """Walk previous_league_id backwards; return leagues newest-first."""
-    chain, cur = [], current_league_id
-    while cur and cur not in ("0", ""):
-        lg = get(f"/league/{cur}")
+    """Walk previous_league_id backwards; return leagues newest-first.
+    Guards against cycles (visited set) and a broken/deleted prior league id (404)."""
+    chain, cur, seen = [], current_league_id, set()
+    while cur and cur not in ("0", "") and cur not in seen:
+        seen.add(cur)
+        lg = get(f"/league/{cur}", allow_404=True)
+        if lg is None:            # a prior-season league id that no longer resolves
+            break
         chain.append(lg)
         cur = lg.get("previous_league_id")
     return chain
@@ -88,6 +106,15 @@ def pull_season(lg: dict, out_root: str) -> dict:
             write_json(os.path.join(base, "transactions", f"week={wk}.json"), tx)
             counts["files"] += 1; counts["transaction_weeks"] += 1
             counts["transactions"] += len(tx)
+
+    # Raw weekly player stats (NFL-wide per season/week) — powers what-if re-scoring.
+    # Only for seasons that have been played (skip the pre-draft upcoming season).
+    if lg.get("status") != "pre_draft":
+        for wk in range(1, MAX_WEEK + 1):
+            st = get(f"/stats/nfl/regular/{season}/{wk}", allow_404=True)
+            if st:
+                write_json(os.path.join(base, "player_stats", f"week={wk}.json"), st)
+                counts["files"] += 1; counts["stat_weeks"] = counts.get("stat_weeks", 0) + 1
 
     # Drafts + picks
     drafts = get(f"/league/{lid}/drafts", allow_404=True) or []

@@ -24,10 +24,14 @@ def _current_managers():
 def gold_luck_adjusted_standings():
     fm = dlt.read("fact_matchup").filter(F.col("is_regular"))
     wk = Window.partitionBy("season", "week")
+    tie = Window.partitionBy("season", "week", "points")
     fm = (fm
           .withColumn("n", F.count(F.lit(1)).over(wk))
           .withColumn("rnk", F.rank().over(wk.orderBy(F.desc("points"))))
-          .withColumn("ap_wins", F.col("n") - F.col("rnk"))      # teams you outscored that week
+          .withColumn("tie_peers", F.count(F.lit(1)).over(tie) - 1)   # teams tied with me this week
+          # teams outscored, counting a tie as HALF (correct all-play semantics; matches rules.all_play).
+          # `n - rnk` counts tied peers as full wins, so subtract 0.5 per tie.
+          .withColumn("ap_wins", (F.col("n") - F.col("rnk")) - 0.5 * F.col("tie_peers"))
           .withColumn("ap_games", F.col("n") - 1)
           .withColumn("h2h_w", (F.col("h2h_result") == "W").cast("int"))
           .withColumn("med_w", (F.col("median_result") == "W").cast("int")))
@@ -38,7 +42,9 @@ def gold_luck_adjusted_standings():
         F.sum("ap_games").alias("all_play_games"),
         F.countDistinct("week").alias("reg_weeks"))
         .withColumn("all_play_pct", F.round(F.col("all_play_wins") / F.col("all_play_games"), 3))
-        .withColumn("expected_wins", F.round(F.col("all_play_pct") * (2 * F.col("reg_weeks")), 1))
+        # use the RAW ratio (not the rounded pct) so expected_wins matches rules.expected_wins
+        .withColumn("expected_wins",
+                    F.round(F.col("all_play_wins") / F.col("all_play_games") * (2 * F.col("reg_weeks")), 1))
         .withColumn("luck", F.round(F.col("actual_wins") - F.col("expected_wins"), 1)))
     return (agg.join(_current_managers(), "user_id", "left")
             .select("season", "display_name", "points_for", "actual_wins",
@@ -69,7 +75,9 @@ def gold_manager_consistency():
            comment="Points left on the bench per team-season (position-agnostic proxy).",
            table_properties={"layer": "gold"})
 def gold_bench_points():
-    rs = dlt.read("fact_roster_slot")
+    # regular season only — playoff/consolation weeks have dead lineups (~37% noise)
+    reg_weeks = dlt.read("dim_week").filter(F.col("is_regular")).select("season", "week")
+    rs = dlt.read("fact_roster_slot").join(reg_weeks, ["season", "week"])
     tw = (rs.groupBy("season", "week", "roster_id", "user_id").agg(
         F.sum(F.when(F.col("is_starter"), F.col("points")).otherwise(0.0)).alias("starter_points"),
         F.min(F.when(F.col("is_starter"), F.col("points"))).alias("worst_starter"),
@@ -92,10 +100,12 @@ def gold_bench_points():
 @dlt.expect("positive_amount", "auction_amount > 0")
 def gold_auction_roi():
     dp = dlt.read("fact_draft_pick").filter(F.col("auction_amount") > 0)
-    pts = (dlt.read("fact_roster_slot").groupBy("season", "player_id")
+    # points earned ON THE DRAFTING ROSTER only (group by roster_id too), so a
+    # player who was traded/dropped doesn't credit another team's points to the drafter.
+    pts = (dlt.read("fact_roster_slot").groupBy("season", "player_id", "roster_id")
            .agg(F.round(F.sum("points"), 2).alias("season_points")))
     dpl = dlt.read("dim_player").select("player_id", "full_name", "position")
-    return (dp.join(pts, ["season", "player_id"], "left")
+    return (dp.join(pts, ["season", "player_id", "roster_id"], "left")
             .join(dpl, "player_id", "left")
             .withColumn("season_points", F.coalesce(F.col("season_points"), F.lit(0.0)))
             .withColumn("points_per_dollar", F.round(F.col("season_points") / F.col("auction_amount"), 2))
@@ -129,3 +139,56 @@ def gold_h2h_matrix():
                 F.count(F.lit(1)).alias("games"))
             .join(mgr, "mgr", "left").join(opp, "opp", "left")
             .select("manager", "opponent", "wins", "losses", "games"))
+
+
+# ---------- gold_dynasty (all-time leaderboard) ----------
+# One row per manager across ALL seasons: career record, finishes, playoff
+# appearances, and championships (winner of the p=1 bracket node). Managers
+# persist across seasons via user_id (roster_id is not stable — gotcha #1).
+@dlt.table(name="gold_dynasty",
+           comment="All-time leaderboard: career record, finishes, playoff runs, championships.",
+           table_properties={"layer": "gold"})
+def gold_dynasty():
+    # per-season regular-season standings from fact_matchup
+    fm = dlt.read("fact_matchup").filter(F.col("is_regular"))
+    per = fm.groupBy("season", "user_id").agg(
+        (F.sum((F.col("h2h_result") == "W").cast("int"))
+         + F.sum((F.col("median_result") == "W").cast("int"))).alias("wins"),
+        (F.sum((F.col("h2h_result") == "L").cast("int"))
+         + F.sum((F.col("median_result") == "L").cast("int"))).alias("losses"),
+        F.round(F.sum("points"), 2).alias("points_for"))
+    rank_w = Window.partitionBy("season").orderBy(F.desc("wins"), F.desc("points_for"))
+    per = per.withColumn("reg_rank", F.row_number().over(rank_w))
+    playoff_teams = dlt.read("dim_season").select("season", "playoff_teams")
+    per = (per.join(playoff_teams, "season", "left")
+           .withColumn("made_playoffs", (F.col("reg_rank") <= F.col("playoff_teams")).cast("int")))
+
+    # championships: winner (w) of the p=1 node, mapped roster_id -> user_id,
+    # restricted to COMPLETE seasons (ignore the 2026 pre-draft skeleton)
+    complete = dlt.read("dim_season").filter(F.col("status") == "complete").select("season")
+    rosters = dlt.read("bronze_rosters").select("season", "roster_id",
+                                                F.col("owner_id").alias("user_id"))
+    champs = (dlt.read("bronze_winners_bracket").filter(F.col("p") == 1)
+              .join(complete, "season")
+              .select("season", F.col("w").alias("roster_id"))
+              .join(rosters, ["season", "roster_id"], "left")
+              .groupBy("user_id").agg(F.count(F.lit(1)).alias("championships")))
+
+    agg = (per.groupBy("user_id").agg(
+        F.countDistinct("season").alias("seasons"),
+        F.sum("wins").alias("career_wins"),
+        F.sum("losses").alias("career_losses"),
+        F.round(F.sum("points_for"), 2).alias("total_points_for"),
+        F.round(F.avg("reg_rank"), 1).alias("avg_finish"),
+        F.min("reg_rank").alias("best_finish"),
+        F.max("reg_rank").alias("worst_finish"),
+        F.sum("made_playoffs").alias("playoff_appearances"))
+        .withColumn("career_win_pct",
+                    F.round(F.col("career_wins") / (F.col("career_wins") + F.col("career_losses")), 3)))
+
+    return (agg.join(champs, "user_id", "left")
+            .withColumn("championships", F.coalesce(F.col("championships"), F.lit(0)))
+            .join(_current_managers(), "user_id", "left")
+            .select("display_name", "seasons", "career_wins", "career_losses", "career_win_pct",
+                    "total_points_for", "avg_finish", "best_finish", "worst_finish",
+                    "playoff_appearances", "championships"))

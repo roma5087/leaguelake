@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
 
 # Editor / OS
 .DS_Store
