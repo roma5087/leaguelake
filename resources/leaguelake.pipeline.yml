@@ -14,6 +14,8 @@ resources:
             path: ../src/pipelines/silver.py   # Silver: star schema + SCD2
         - file:
             path: ../src/pipelines/gold.py     # Gold: business metrics
+        - file:
+            path: ../src/pipelines/scenario.py # what-if scoring simulator tables
       configuration:
         # Exposed to bronze.py via spark.conf.get("leaguelake.volume_root")
         leaguelake.volume_root: /Volumes/workspace/leaguelake/bronze/raw

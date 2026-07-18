@@ -78,3 +78,26 @@ def bronze_players_raw():
             F.current_timestamp().alias("_ingest_ts"),
         )
     )
+
+
+# Raw weekly player stats (one dict keyed by player_id per season-week) — powers
+# the what-if scoring simulator. Wide like the player dict, so land as one JSON
+# blob per file and parse the map in Silver.
+@dlt.table(
+    name="bronze_player_stats",
+    comment="Raw weekly NFL player stats as one JSON string per season-week (parsed in Silver).",
+    table_properties={"layer": "bronze"},
+)
+def bronze_player_stats():
+    return (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "binaryFile")
+        .load(f"{VOLUME_ROOT}/season=*/player_stats/")
+        .select(
+            F.decode(F.col("content"), "utf-8").alias("stats_json"),
+            F.regexp_extract("path", r"season=(\d{4})", 1).alias("season"),
+            F.regexp_extract("path", r"week=(\d+)", 1).cast("int").alias("week"),
+            F.col("path").alias("_source_file"),
+            F.current_timestamp().alias("_ingest_ts"),
+        )
+    )
