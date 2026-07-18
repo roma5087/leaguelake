@@ -19,3 +19,4 @@ venv/
 # Secrets / local config
 .env
 *.env
+app_data/
