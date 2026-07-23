@@ -221,3 +221,36 @@ def fact_draft_pick():
            table_properties={"layer": "silver"})
 def fact_roster_slot_quarantine():
     return dlt.read("fact_roster_slot").filter("is_starter = true AND points IS NULL")
+
+
+# ==================== DATA-QUALITY GATES (structural invariants) ====================
+# @dlt.expect is row-level, so to assert an AGGREGATE invariant (group size, key
+# uniqueness) we materialize the per-group counts and FAIL the update if any row
+# violates it. These are the grains the interactive app depends on — a violation
+# means corrupt data (e.g. join fan-out), so they fail-closed rather than warn.
+# (reconcile.py runs the same assertions post-hoc against the deployed lakehouse.)
+
+@dlt.table(name="dq_matchup_group_size",
+           comment="DQ: every regular-season matchup group must have exactly 2 teams.",
+           table_properties={"layer": "silver"})
+@dlt.expect_or_fail("group_is_2", "cnt = 2")
+def dq_matchup_group_size():
+    return (dlt.read("fact_matchup").filter("is_regular AND matchup_id IS NOT NULL")
+            .groupBy("season", "week", "matchup_id").agg(F.count(F.lit(1)).alias("cnt")))
+
+
+@dlt.table(name="dq_unique_player",
+           comment="DQ: dim_player has exactly one row per player_id.",
+           table_properties={"layer": "silver"})
+@dlt.expect_or_fail("player_unique", "cnt = 1")
+def dq_unique_player():
+    return dlt.read("dim_player").groupBy("player_id").agg(F.count(F.lit(1)).alias("cnt"))
+
+
+@dlt.table(name="dq_unique_current_manager",
+           comment="DQ: the current dim_manager slice has one row per user_id.",
+           table_properties={"layer": "silver"})
+@dlt.expect_or_fail("manager_unique", "cnt = 1")
+def dq_unique_current_manager():
+    return (dlt.read("dim_manager").filter("`__END_AT` IS NULL")
+            .groupBy("user_id").agg(F.count(F.lit(1)).alias("cnt")))

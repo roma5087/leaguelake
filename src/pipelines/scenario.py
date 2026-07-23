@@ -95,3 +95,16 @@ def gold_scoring_settings():
             .select("season",
                     F.to_json(F.col("scoring_settings")).alias("scoring_json"),
                     F.col("settings.playoff_week_start").cast("int").alias("playoff_week_start")))
+
+
+# ---------- dq_one_def_per_team_week : structural gate for the simulator ----------
+# The what-if re-scoring assumes exactly one started DEF per team-week; if a team-week
+# ever had two, gold_scenario_input would fan out and the app's totals would be wrong.
+# Fail the update if that invariant breaks. (reconcile.py checks it post-hoc too.)
+@dlt.table(name="dq_one_def_per_team_week",
+           comment="DQ: exactly one started DEF per team-week (simulator re-scoring is 1:1).",
+           table_properties={"layer": "gold"})
+@dlt.expect_or_fail("one_def", "cnt = 1")
+def dq_one_def_per_team_week():
+    return (dlt.read("silver_def_stats")
+            .groupBy("season", "week", "roster_id").agg(F.count(F.lit(1)).alias("cnt")))
