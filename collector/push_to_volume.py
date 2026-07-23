@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 PROFILE = os.environ.get("LEAGUELAKE_PROFILE", "leaguelake")
-LOCAL_RAW = os.path.expanduser("~/leaguelake/raw")
+LOCAL_RAW = os.environ.get("LEAGUELAKE_RAW", os.path.expanduser("~/leaguelake/raw"))
 VOLUME_RAW = "dbfs:/Volumes/workspace/leaguelake/bronze/raw"
 
 

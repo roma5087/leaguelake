@@ -12,10 +12,12 @@ Output: app_data/leaguelake.json  (also the file the MR_002 page consumes).
 """
 import subprocess, json, os, glob
 
-PROFILE = "leaguelake"
+# Auth/paths are env-overridable so this runs both locally (CLI profile) and in
+# CI (DATABRICKS_HOST/TOKEN env + LEAGUELAKE_PROFILE="").
+PROFILE = os.environ.get("LEAGUELAKE_PROFILE", "leaguelake")
 CAT = "workspace.leaguelake"
-RAW = os.path.expanduser("~/leaguelake/raw")
-OUT = os.path.expanduser("~/leaguelake/app_data/leaguelake.json")
+RAW = os.environ.get("LEAGUELAKE_RAW", os.path.expanduser("~/leaguelake/raw"))
+OUT = os.environ.get("LEAGUELAKE_OUT", os.path.expanduser("~/leaguelake/app_data/leaguelake.json"))
 
 # defensive scoring keys the simulator exposes (the ones a DEF change touches)
 DEF_KEYS = ["sack", "int", "ff", "fum_rec", "fum_rec_td", "def_td", "def_st_td",
@@ -26,7 +28,7 @@ DEF_KEYS = ["sack", "int", "ff", "fum_rec", "fum_rec_td", "def_td", "def_st_td",
 
 
 def _dbx(args, payload=None):
-    cmd = ["databricks"] + args + ["--profile", PROFILE]
+    cmd = ["databricks"] + args + (["--profile", PROFILE] if PROFILE else [])
     if payload is not None:
         cmd += ["--json", json.dumps(payload)]
     r = subprocess.run(cmd, capture_output=True, text=True)

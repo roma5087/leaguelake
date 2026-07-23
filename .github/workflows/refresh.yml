@@ -1,0 +1,86 @@
+name: Weekly data refresh
+
+# Refreshes the whole chain after each NFL week and republishes the portfolio:
+#   pull (Sleeper) -> push to Volume -> run pipeline -> reconcile -> export -> publish.
+# Runs on the GitHub runner because the Databricks Free Edition cluster can't reach
+# the internet; the pipeline itself runs on Databricks. All steps are idempotent, so
+# re-running (or running before the season starts) is safe and a no-op when nothing
+# changed. Everything here is free: public-repo Actions minutes + Free Edition compute.
+on:
+  # 13:00 UTC (~8-9am ET) Wednesdays, Sep-Jan — after Monday-night games and the
+  # Tuesday stat corrections have settled. (min hour dom month dow; dow 3 = Wed)
+  schedule:
+    - cron: "0 13 * 9-12,1 3"
+  workflow_dispatch: {}   # allow manual runs any time
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_HOST: https://dbc-fc62342d-ea44.cloud.databricks.com   # not secret
+  LEAGUELAKE_PROFILE: ""                                            # use env-token auth, not a CLI profile
+  LEAGUELAKE_RAW: ${{ github.workspace }}/raw
+  LEAGUELAKE_OUT: ${{ github.workspace }}/app_data/leaguelake.json
+  PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src
+
+jobs:
+  refresh:
+    name: Refresh + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # pinned to a commit SHA (v1.7.0) — same pin as ci.yml
+      - uses: databricks/setup-cli@bc7e6aabb6006d8d1758bd25ee1a100935c9cb7c
+
+      - name: Pull from Sleeper
+        run: python collector/pull_sleeper.py --out "$LEAGUELAKE_RAW"
+
+      - name: Push raw to the Volume (verified)
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: python -m collector.push_to_volume
+
+      - name: Deploy bundle (ensure the pipeline is current)
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle deploy -t dev
+
+      - name: Run the medallion pipeline
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle run leaguelake_pipeline -t dev
+
+      - name: Reconcile against the deployed lakehouse (gate)
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: python -m leaguelake.reconcile   # fails the job if any invariant breaks
+
+      - name: Export the app payload from Gold
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: python exporter/build_app_data.py
+
+      - name: Publish to the portfolio (only if data changed)
+        env:
+          GH_TOKEN: ${{ secrets.PORTFOLIO_DEPLOY_TOKEN }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/roma5087/aws-portfolio.git" portfolio
+          cp "$LEAGUELAKE_OUT" portfolio/frontend/public/data/leaguelake.json
+          cd portfolio
+          if git diff --quiet -- frontend/public/data/leaguelake.json; then
+            echo "No data change — nothing to publish."
+          else
+            git config user.name  "leaguelake-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add frontend/public/data/leaguelake.json
+            git commit -m "Refresh LeagueLake data ($(date -u +%Y-%m-%d))"
+            git push
+            echo "Pushed data update — the portfolio deploy workflow will publish it."
+          fi
