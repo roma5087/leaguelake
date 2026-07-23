@@ -11,7 +11,7 @@ Checks (per the modelling grain that feeds the app):
   1. fact_roster_slot starters == fact_matchup rows            (no join fan-out)
   2. every REGULAR matchup group has exactly 2 teams           (H2H is well-defined)
   3. exactly one started DEF per team-week                     (scenario re-scoring is 1:1)
-  4. SUM(luck) == 0 per season                                 (zero-sum, tie convention consistent)
+  4. luck is zero-sum per season (up to per-team rounding)     (tie convention consistent)
   5. current dim_manager slice has unique user_id              (SCD2 "current" is a function)
   6. dim_player has unique player_id                           (no duplicate dimension rows)
 
@@ -67,15 +67,17 @@ def _scalar(sql):
 
 # each check returns (name, ok: bool, detail: str)
 def check_roster_slot_matches_matchup():
-    starters = int(_scalar(f"SELECT COUNT(*) FROM {CAT}.fact_roster_slot WHERE is_starter = true"))
-    # a matchup row's points is the sum of its started slots, so counts differ by
-    # roster size — instead assert every team-week in fact_matchup has starters.
+    # Scope to the regular season: an eliminated playoff team can legitimately have
+    # a 0-point, no-matchup team-week with no lineup set (e.g. 2025 wk15 roster 5).
+    # The invariant that feeds standings/median is that every REGULAR team-week has
+    # started slots (no join fan-out / no missing lineup).
     orphans = int(_scalar(f"""
         SELECT COUNT(*) FROM {CAT}.fact_matchup m
         LEFT ANTI JOIN (SELECT DISTINCT season, week, roster_id FROM {CAT}.fact_roster_slot WHERE is_starter = true) s
-        USING (season, week, roster_id)"""))
-    return ("team-weeks all have starters", orphans == 0,
-            f"{orphans} matchup team-weeks with no started slots (starters={starters})")
+        USING (season, week, roster_id)
+        WHERE m.is_regular = true"""))
+    return ("regular team-weeks all have starters", orphans == 0,
+            f"{orphans} regular team-weeks with no started slots")
 
 
 def check_matchup_group_size():
@@ -98,9 +100,15 @@ def check_one_def_per_team_week():
 
 
 def check_luck_sums_to_zero():
-    rows = query(f"SELECT season, ROUND(SUM(luck), 3) FROM {CAT}.gold_luck_adjusted_standings GROUP BY season")
-    offenders = [(s, v) for s, v in rows if abs(float(v)) > 1e-3]
-    return ("SUM(luck) == 0 per season", not offenders, f"non-zero seasons: {offenders}")
+    # Luck is zero-sum on UNROUNDED values (SUM(actual) == SUM(expected)). The stored
+    # `luck` column is per-team rounded to 0.1, so the league total carries up to
+    # 0.05 * teams of rounding residue (observed: 0.1). Assert within that bound —
+    # a real logic error (e.g. an inconsistent tie convention) would exceed it.
+    rows = query(f"""SELECT season, ROUND(SUM(luck), 3), COUNT(*)
+                     FROM {CAT}.gold_luck_adjusted_standings GROUP BY season""")
+    offenders = [(s, v) for s, v, n in rows if abs(float(v)) > 0.05 * int(n) + 1e-9]
+    return ("luck zero-sum per season (within 0.1/team rounding)", not offenders,
+            f"seasons beyond rounding bound: {offenders}")
 
 
 def check_unique_current_manager():

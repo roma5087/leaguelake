@@ -9,9 +9,9 @@ the SAME rules in Spark.
 
 Because a local Spark session isn't available here, end-to-end correctness of
 the Spark implementation is checked by leaguelake/reconcile.py — a set of
-assertions run against the deployed lakehouse (e.g. fact_roster_slot starter
-count == fact_matchup rows, every regular matchup group has exactly 2 teams,
-one DEF per team-week, and SUM(luck) == 0 per season). Run it with
+assertions run against the deployed lakehouse (e.g. every regular team-week has
+started slots, every regular matchup group has exactly 2 teams, one DEF per
+team-week, and luck is zero-sum per season). Run it with
 `python -m leaguelake.reconcile` after a pipeline run.
 """
 from __future__ import annotations

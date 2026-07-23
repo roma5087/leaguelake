@@ -115,7 +115,7 @@ def main():
     rows = query(f"""
         SELECT season, week, user_id, matchup_id, actual_points, non_def_points,
                def_id, to_json(def_stats) AS def_stats, is_regular
-        FROM {CAT}.gold_scenario_input ORDER BY season, week""")
+        FROM {CAT}.gold_scenario_input ORDER BY season, week, user_id""")
 
     seasons = {}
     for season, week, uid, mid, actual, non_def, did, dstats, is_reg in rows:
