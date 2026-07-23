@@ -14,6 +14,13 @@ import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.types import MapType, StringType, DoubleType
 
+# defensive scoring keys (what a DEF-settings change touches)
+DEF_KEYS = ["sack", "int", "ff", "fum_rec", "fum_rec_td", "def_td", "def_st_td", "def_st_ff",
+            "def_st_fum_rec", "def_2pt", "safe", "blk_kick", "pts_allow", "pts_allow_0",
+            "pts_allow_1_6", "pts_allow_7_13", "pts_allow_14_20", "pts_allow_21_27",
+            "pts_allow_28_34", "pts_allow_35p", "def_4_and_stop", "tkl_loss", "st_ff",
+            "st_fum_rec", "st_td"]
+
 
 # ---------- silver_def_stats : the started DEF's raw stats per team-week ----------
 @dlt.table(name="silver_def_stats",
@@ -52,3 +59,39 @@ def gold_scenario_input():
             .select("season", "week", "roster_id", "user_id", "matchup_id",
                     F.col("points").alias("actual_points"), "non_def_points",
                     "def_id", "def_stats", "is_regular"))
+
+
+# ---------- gold_nfl_defense_stats : every NFL defense's season-summed stats ----------
+# For the "defense value board" — score any settings against these to rank all 32
+# real NFL defenses. Scoring is linear, so season points = Σ(season_stat × setting).
+@dlt.table(name="gold_nfl_defense_stats",
+           comment="Per season, each NFL team defense's season-summed raw stats (for the value board).",
+           table_properties={"layer": "gold"})
+def gold_nfl_defense_stats():
+    parsed = (dlt.read("bronze_player_stats")
+              .select("season",
+                      F.from_json("stats_json",
+                                  MapType(StringType(), MapType(StringType(), DoubleType()))).alias("m")))
+    # explode to one row per (season, week, player_id, stats); keep team-abbrev DEF ids
+    per_week = (parsed.select("season", F.explode("m").alias("def_id", "stats"))
+                .filter(F.col("def_id").rlike("^[A-Z]+$")))
+    # explode inner stat map, keep DEF-relevant keys, sum across the season
+    kv = (per_week.select("season", "def_id", F.explode("stats").alias("k", "v"))
+          .filter(F.col("k").isin(DEF_KEYS))
+          .groupBy("season", "def_id", "k").agg(F.sum("v").alias("total")))
+    return (kv.groupBy("season", "def_id")
+            .agg(F.map_from_entries(F.collect_list(F.struct("k", "total"))).alias("stats")))
+
+
+# ---------- gold_scoring_settings : per-season scoring config (settings source of truth) ----------
+# The exporter used to read scoring_settings + playoff_week_start straight from the
+# raw league files, bypassing the medallion. Surface them from bronze_league so Gold
+# is the single source of truth and the app can't drift from what the pipeline scored.
+@dlt.table(name="gold_scoring_settings",
+           comment="Per season: full scoring_settings (JSON) + playoff_week_start, from bronze_league.",
+           table_properties={"layer": "gold"})
+def gold_scoring_settings():
+    return (dlt.read("bronze_league")
+            .select("season",
+                    F.to_json(F.col("scoring_settings")).alias("scoring_json"),
+                    F.col("settings.playoff_week_start").cast("int").alias("playoff_week_start")))

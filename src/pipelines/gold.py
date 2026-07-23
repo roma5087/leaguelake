@@ -33,11 +33,17 @@ def gold_luck_adjusted_standings():
           # `n - rnk` counts tied peers as full wins, so subtract 0.5 per tie.
           .withColumn("ap_wins", (F.col("n") - F.col("rnk")) - 0.5 * F.col("tie_peers"))
           .withColumn("ap_games", F.col("n") - 1)
-          .withColumn("h2h_w", (F.col("h2h_result") == "W").cast("int"))
-          .withColumn("med_w", (F.col("median_result") == "W").cast("int")))
+          # count a tie as 0.5 — the SAME convention as ap_wins above — so that
+          # actual and expected wins agree on ties and league-wide luck nets to
+          # exactly 0. (Counting a tie as a 0 win, as before, left luck off by the
+          # tie fraction whenever an exact H2H/median tie occurred.)
+          .withColumn("h2h_w", F.when(F.col("h2h_result") == "W", 1.0)
+                      .when(F.col("h2h_result") == "T", 0.5).otherwise(0.0))
+          .withColumn("med_w", F.when(F.col("median_result") == "W", 1.0)
+                      .when(F.col("median_result") == "T", 0.5).otherwise(0.0)))
     agg = (fm.groupBy("season", "user_id").agg(
         F.round(F.sum("points"), 2).alias("points_for"),
-        (F.sum("h2h_w") + F.sum("med_w")).alias("actual_wins"),
+        F.round(F.sum("h2h_w") + F.sum("med_w"), 1).alias("actual_wins"),
         F.sum("ap_wins").alias("all_play_wins"),
         F.sum("ap_games").alias("all_play_games"),
         F.countDistinct("week").alias("reg_weeks"))

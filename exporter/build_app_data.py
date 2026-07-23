@@ -50,13 +50,56 @@ def query(sql):
     return r["result"].get("data_array", [])
 
 
+def _settings_from_gold():
+    """season -> {'scoring': {...}, 'pws': int} from gold_scoring_settings.
+
+    Gold is the source of truth. Returns {} (and warns) if the table isn't there
+    yet — a migration bridge so a pre-deploy run still works off the raw files.
+    Once the pipeline with gold_scoring_settings has run, the fallback is dead.
+    """
+    out = {}
+    try:
+        for season, scoring_json, pws in query(
+                f"SELECT season, scoring_json, playoff_week_start FROM {CAT}.gold_scoring_settings"):
+            out[season] = {"scoring": json.loads(scoring_json) if scoring_json else {},
+                           "pws": int(pws) if pws is not None else None}
+    except Exception as e:
+        print(f"  WARN: gold_scoring_settings unavailable ({e}); falling back to raw league files")
+    return out
+
+
+_SETTINGS = None  # lazily loaded once (see main)
+
+
+def _raw_league(season):
+    return json.load(open(f"{RAW}/season={season}/league/league.json"))
+
+
+def _scoring(season):
+    """Full scoring_settings dict for a season — Gold-preferred, raw fallback."""
+    g = (_SETTINGS or {}).get(season)
+    if g and g["scoring"]:
+        return g["scoring"]
+    return _raw_league(season)["scoring_settings"]
+
+
+def playoff_week_start(season):
+    g = (_SETTINGS or {}).get(season)
+    if g and g["pws"] is not None:
+        return g["pws"]
+    return _raw_league(season)["settings"]["playoff_week_start"]
+
+
 def def_settings(season):
-    """DEF-relevant scoring settings for a season, from the local raw league file."""
-    sc = json.load(open(f"{RAW}/season={season}/league/league.json"))["scoring_settings"]
+    """DEF-relevant scoring settings for a season (from Gold, raw as fallback)."""
+    sc = _scoring(season)
     return {k: sc[k] for k in DEF_KEYS if k in sc and sc[k] is not None}
 
 
 def main():
+    global _SETTINGS
+    _SETTINGS = _settings_from_gold()  # Gold is the source of truth for scoring config
+
     # managers: user_id -> current display_name
     managers = {u: n for u, n in query(
         f"SELECT user_id, display_name FROM {CAT}.dim_manager WHERE `__END_AT` IS NULL")}
@@ -77,7 +120,7 @@ def main():
     seasons = {}
     for season, week, uid, mid, actual, non_def, did, dstats, is_reg in rows:
         s = seasons.setdefault(season, {
-            "playoff_week_start": json.load(open(f"{RAW}/season={season}/league/league.json"))["settings"]["playoff_week_start"],
+            "playoff_week_start": playoff_week_start(season),
             "actual_champion": managers.get(champ.get(season), champ.get(season)),
             "def_settings_current": def_settings(season),
             "team_weeks": [],
@@ -88,6 +131,12 @@ def main():
             "def_stats": {k: v for k, v in (json.loads(dstats) if dstats else {}).items() if k in DEF_KEYS},
             "reg": (is_reg in (True, "true", 1)),
         })
+
+    # NFL defense value board — each real defense's season-summed stats
+    for season, did, dstats in query(
+            f"SELECT season, def_id, to_json(stats) FROM {CAT}.gold_nfl_defense_stats"):
+        if season in seasons:
+            seasons[season].setdefault("defenses", {})[did] = json.loads(dstats)
 
     payload = {
         "generated_season_scope": sorted(seasons),
